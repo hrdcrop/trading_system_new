@@ -1,0 +1,9 @@
+Connection error: 1006 - connection was closed uncleanly (peer dropped the TCP connection without previous WebSocket closing handshake)
+Connection closed: 1006 - connection was closed uncleanly (peer dropped the TCP connection without previous WebSocket closing handshake)
+🚀 Tick JSON saver started
+📦 DB: tick_json_data.db
+📊 Tokens: 19
+🧠 Mode: FULL (5-level depth)
+✅ Connected | Subscribed to 19 tokens
+⚠️ WebSocket error: connection was closed uncleanly (peer dropped the TCP connection without previous WebSocket closing handshake)
+❌ WebSocket closed: connection was closed uncleanly (peer dropped the TCP connection without previous WebSocket closing handshake)
