@@ -1,0 +1,15 @@
+# === SECRETS ===
+access_token.txt
+api_key.txt
+telegram_token.txt
+chat_id.txt
+
+# === DATABASES ===
+*.db
+
+# === LOGS ===
+logs/
+
+# === CACHE / TEMP ===
+__pycache__/
+*.pyc
