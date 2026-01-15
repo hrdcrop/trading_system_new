@@ -1,4 +1,24 @@
 #!/bin/bash
+echo "🔍 Pre-flight checks..."
+
+REQUIRED_FILES=(
+  "access_token.txt"
+  "api_key.txt"
+  "telegram_token.txt"
+  "chat_id.txt"
+)
+
+for file in "${REQUIRED_FILES[@]}"; do
+  if [ ! -f "$file" ]; then
+    echo "❌ Missing required file: $file"
+    exit 1
+  fi
+done
+
+echo "✅ All required files found"
+
+
+
 
 echo "🚀 Starting Professional Trading System..."
 
@@ -6,6 +26,10 @@ echo "🚀 Starting Professional Trading System..."
 echo "🔪 Killing existing processes..."
 pkill -f tick_json_saver.py
 pkill -f candle_builder_1m.py
+
+# Database migration check
+echo "🔄 Checking database schema..."
+python3 migrate_database.py 2>/dev/null || true
 pkill -f oi_category_builder.py
 pkill -f comprehensive_analytics_engine.py
 pkill -f alert_engine_pro.py

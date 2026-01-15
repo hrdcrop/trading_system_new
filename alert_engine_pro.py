@@ -51,6 +51,7 @@ BID_ASK_BUY_THRESHOLD = 1.5
 BID_ASK_SELL_THRESHOLD = 0.67
 ORDER_IMBALANCE_THRESHOLD = 100
 HIGH_VIX = 18
+NORMAL_VIX = 15
 LOW_VIX = 12
 
 # =====================================================
@@ -168,6 +169,13 @@ def init_alert_db():
         telegram_sent INTEGER DEFAULT 0
     )
     """)
+    
+    # Migration: Add telegram_sent to existing tables
+    try:
+        cur.execute("ALTER TABLE alerts_final ADD COLUMN telegram_sent INTEGER DEFAULT 0")
+        print("✅ Added telegram_sent column to existing table")
+    except sqlite3.OperationalError:
+        pass  # Column already exists
     
     cur.execute("CREATE INDEX IF NOT EXISTS idx_alerts_time ON alerts_final(time)")
     cur.execute("CREATE INDEX IF NOT EXISTS idx_alerts_symbol ON alerts_final(symbol)")
@@ -418,7 +426,8 @@ def process_alert(time_str: str, alert_conn) -> None:
     """Main alert generation logic"""
     
     for fut_token, fut_name in FUTURE_TOKENS.items():
-        symbol = fut_name.replace("_FUT", "")
+        try:
+            symbol = fut_name.replace("_FUT", "")
         
         # 1. Get analytics
         analytics = get_latest_analytics(symbol, time_str)
@@ -468,7 +477,7 @@ def process_alert(time_str: str, alert_conn) -> None:
         vix_value = analytics.get('vix_value', 15.0)
         if vix_value < LOW_VIX:
             vix_state = VixState.LOW
-        elif vix_value < 15:
+        elif vix_value < NORMAL_VIX:
             vix_state = VixState.NORMAL
         elif vix_value < HIGH_VIX:
             vix_state = VixState.HIGH
@@ -517,27 +526,36 @@ def process_alert(time_str: str, alert_conn) -> None:
             action=action.value
         )
         
-        # 13. WRITE TO DATABASE
-        cur.execute("""
-            INSERT INTO alerts_final
-            (time, symbol, future_oi_category, depth_bias, index_bias,
-             sector_bias, market_bias, regime, vix_state, confidence, recommended_action)
-            VALUES (?,?,?,?,?,?,?,?,?,?,?)
-        """, (
-            context.time, context.symbol,
-            context.future_oi, context.depth_bias, context.index_bias,
-            context.sector_bias, context.market_bias, context.regime, context.vix_state,
-            context.confidence, context.action
-        ))
-        
-        alert_conn.commit()
-        
-        # 14. SEND TO TELEGRAM
+        # 13. SEND TO TELEGRAM FIRST
         telegram_msg = format_telegram_alert(context)
         priority = "HIGH" if confidence >= 75 else "MEDIUM"
         send_telegram(telegram_msg, priority)
         
+        # 14. WRITE TO DATABASE (with telegram status)
+        telegram_status = 1 if TELEGRAM_ENABLED else 0
+        
+        cur.execute("""
+            INSERT INTO alerts_final
+            (time, symbol, future_oi_category, depth_bias, index_bias,
+             sector_bias, market_bias, regime, vix_state, confidence, 
+             recommended_action, telegram_sent)
+            VALUES (?,?,?,?,?,?,?,?,?,?,?,?)
+        """, (
+            context.time, context.symbol,
+            context.future_oi, context.depth_bias, context.index_bias,
+            context.sector_bias, context.market_bias, context.regime, context.vix_state,
+            context.confidence, context.action, telegram_status
+        ))
+        
+        alert_conn.commit()
+        
         print(f"✅ ALERT: {symbol} | {oi_category} | {action.value} | Conf:{confidence}")
+        
+        except Exception as e:
+            print(f"[ALERT ERR] {symbol}: {e}")
+            import traceback
+            traceback.print_exc()
+            continue
 
 # =====================================================
 # MAIN LOOP
