@@ -11,6 +11,8 @@ FEATURES:
 ✅ Cooldown period to reduce noise (v2.1)
 """
 
+
+
 import sqlite3
 import time
 import requests
@@ -19,6 +21,7 @@ from dataclasses import dataclass
 from enum import Enum
 from typing import Dict, List, Optional, Tuple
 import statistics
+from secrets import TELEGRAM_TOKEN, CHAT_ID
 
 # =====================================================
 # CONFIG
@@ -30,14 +33,8 @@ ANALYTICS_DB = "market_analytics.db"
 ALERT_DB = "alerts_pro.db"
 
 # Telegram Config
-try:
-    TELEGRAM_TOKEN = open("telegram_token.txt").read().strip()
-    CHAT_ID = open("chat_id.txt").read().strip()
-    TELEGRAM_ENABLED = True
-except:
-    TELEGRAM_TOKEN = CHAT_ID = None
-    TELEGRAM_ENABLED = False
-    print("⚠️ Telegram not configured. Alerts will be console-only.")
+
+TELEGRAM_ENABLED = bool(TELEGRAM_TOKEN and CHAT_ID)
 
 # Tokens
 FUTURE_TOKENS = {13568258: "BANKNIFTY_FUT", 256265: "NIFTY_FUT"}

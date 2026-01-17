@@ -1,5 +1,7 @@
 #!/usr/bin/env python3
 
+from secrets import KITE_API_KEY, KITE_ACCESS_TOKEN
+
 from kiteconnect import KiteTicker, KiteConnect
 import sqlite3
 import json
@@ -12,8 +14,11 @@ import sys
 # CONFIG
 # =====================================================
 
-API_KEY = open("api_key.txt").read().strip()
-ACCESS_TOKEN = open("access_token.txt").read().strip()
+kite = KiteConnect(api_key=KITE_API_KEY)
+kite.set_access_token(KITE_ACCESS_TOKEN)
+
+kws = KiteTicker(KITE_API_KEY, KITE_ACCESS_TOKEN)
+
 
 DB_NAME = "tick_json_data.db"
 IST = pytz.timezone("Asia/Kolkata")

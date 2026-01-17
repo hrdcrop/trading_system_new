@@ -19,3 +19,11 @@ __pycache__/
 
 # === VIRTUAL ENV ===
 nifty_env/
+
+
+# === SECRETS KEY ===
+secrets.py
+
+# === EDITOR TEMP FILES ===
+*.swp
+*.swo
