@@ -1,15 +1,21 @@
 # === SECRETS ===
-access_token.txt
 api_key.txt
+access_token.txt
 telegram_token.txt
 chat_id.txt
+.env
+config/
 
 # === DATABASES ===
 *.db
 
-# === LOGS ===
+# === LOGS & BACKUPS ===
 logs/
+backups/
 
-# === CACHE / TEMP ===
+# === PYTHON CACHE ===
 __pycache__/
 *.pyc
+
+# === VIRTUAL ENV ===
+nifty_env/
