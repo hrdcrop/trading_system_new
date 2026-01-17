@@ -1,19 +1,19 @@
+
 #!/usr/bin/env python3
 """
-PROFESSIONAL ALERT ENGINE v1.0
+PROFESSIONAL ALERT ENGINE v2.0 - WITH TELEGRAM
 Context-Aware Market Decision System
 
-Philosophy:
-- OI = INTENT (anchor)
-- Depth = EXECUTION (trigger)
-- Index/Stocks = CONFIRMATION (filter)
-- Regime/VIX = CONTEXT (action mapper)
-
-NOT a signal generator. A market state analyzer.
+NEW FEATURES:
+✅ Telegram bot integration
+✅ Mobile-friendly alerts
+✅ Health monitoring
+✅ Auto-retry on failure
 """
 
 import sqlite3
 import time
+import requests
 from datetime import datetime, timedelta
 from dataclasses import dataclass
 from enum import Enum
@@ -29,10 +29,20 @@ OI_DB = "oi_analysis.db"
 ANALYTICS_DB = "market_analytics.db"
 ALERT_DB = "alerts_pro.db"
 
+# Telegram Config
+try:
+    TELEGRAM_TOKEN = open("telegram_token.txt").read().strip()
+    CHAT_ID = open("chat_id.txt").read().strip()
+    TELEGRAM_ENABLED = True
+except:
+    TELEGRAM_TOKEN = CHAT_ID = None
+    TELEGRAM_ENABLED = False
+    print("⚠️ Telegram not configured. Alerts will be console-only.")
+
 # Tokens
 FUTURE_TOKENS = {13568258: "BANKNIFTY_FUT", 256265: "NIFTY_FUT"}
 INDEX_TOKENS = {12601346: "BANKNIFTY", 12602626: "NIFTY"}
-BANKING_STOCKS = [341249, 1270529, 779521, 492033, 1510401, 1346049]  # HDFC, ICICI, SBI, KOTAK, AXIS, INDUSIND
+BANKING_STOCKS = [341249, 1270529, 779521, 492033, 1510401, 1346049]
 NBFC_STOCKS = [12622082, 12621826, 12804354, 12706818, 12628994]
 VIX_TOKEN = 264969
 
@@ -42,7 +52,46 @@ BID_ASK_BUY_THRESHOLD = 1.5
 BID_ASK_SELL_THRESHOLD = 0.67
 ORDER_IMBALANCE_THRESHOLD = 100
 HIGH_VIX = 18
+NORMAL_VIX = 15
 LOW_VIX = 12
+
+# =====================================================
+# TELEGRAM INTEGRATION
+# =====================================================
+
+def send_telegram(message: str, priority: str = "NORMAL"):
+    """Send alert to Telegram with emoji formatting"""
+    if not TELEGRAM_ENABLED:
+        print(f"[CONSOLE] {message}")
+        return
+    
+    try:
+        # Add priority emoji
+        if priority == "HIGH":
+            message = f"🔴 <b>HIGH PRIORITY</b>\n\n{message}"
+        elif priority == "MEDIUM":
+            message = f"🟡 <b>ALERT</b>\n\n{message}"
+        
+        response = requests.post(
+            f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage",
+            data={
+                "chat_id": CHAT_ID,
+                "text": message,
+                "parse_mode": "HTML",
+                "disable_web_page_preview": True
+            },
+            timeout=5
+        )
+        
+        if response.status_code == 200:
+            print(f"✅ Telegram sent: {message[:50]}...")
+        else:
+            print(f"❌ Telegram failed: {response.status_code}")
+            
+    except Exception as e:
+        print(f"❌ Telegram error: {e}")
+        # Fallback to console
+        print(f"[CONSOLE FALLBACK] {message}")
 
 # =====================================================
 # ENUMS
@@ -117,9 +166,17 @@ def init_alert_db():
         confidence INTEGER,
         recommended_action TEXT,
         
-        metadata TEXT
+        metadata TEXT,
+        telegram_sent INTEGER DEFAULT 0
     )
     """)
+    
+    # Migration: Add telegram_sent to existing tables
+    try:
+        cur.execute("ALTER TABLE alerts_final ADD COLUMN telegram_sent INTEGER DEFAULT 0")
+        print("✅ Added telegram_sent column to existing table")
+    except sqlite3.OperationalError:
+        pass  # Column already exists
     
     cur.execute("CREATE INDEX IF NOT EXISTS idx_alerts_time ON alerts_final(time)")
     cur.execute("CREATE INDEX IF NOT EXISTS idx_alerts_symbol ON alerts_final(symbol)")
@@ -138,7 +195,6 @@ def get_latest_analytics(symbol: str, time: str) -> Optional[dict]:
         conn.row_factory = sqlite3.Row
         cur = conn.cursor()
         
-        # Get token for symbol
         token = None
         if symbol == "BANKNIFTY":
             token = 12601346
@@ -238,15 +294,7 @@ def calculate_confidence(
     regime: MarketRegime,
     vix_state: VixState
 ) -> int:
-    """
-    Calculate 0-100 confidence score
-    
-    Weights:
-    - OI + Depth → 40 points
-    - Sector alignment → 30 points
-    - Index alignment → 20 points
-    - Regime + VIX → 10 points
-    """
+    """Calculate 0-100 confidence score"""
     score = 0
     
     # Component 1: OI + Depth (40 points)
@@ -256,9 +304,9 @@ def calculate_confidence(
     depth_bearish = depth_bias == DepthBias.SELLER_DOMINANT
     
     if (oi_bullish and depth_bullish) or (oi_bearish and depth_bearish):
-        score += 40  # Perfect alignment
+        score += 40
     elif oi_bullish or oi_bearish or depth_bullish or depth_bearish:
-        score += 20  # Partial signal
+        score += 20
     
     # Component 2: Sector (30 points)
     if sector_bias == "BULLISH" and (oi_bullish or depth_bullish):
@@ -328,15 +376,59 @@ def map_action(
     return Action.NO_TRADE
 
 # =====================================================
+# TELEGRAM ALERT FORMATTER
+# =====================================================
+
+def format_telegram_alert(context: MarketContext) -> str:
+    """Format alert for mobile/Telegram"""
+    
+    # Determine alert type
+    if "BUY_CE" in context.action:
+        emoji = "🟢"
+        action_text = "BUY CALL"
+    elif "BUY_PE" in context.action:
+        emoji = "🔴"
+        action_text = "BUY PUT"
+    elif "SELL" in context.action:
+        emoji = "🟡"
+        action_text = "SELL PREMIUM"
+    else:
+        emoji = "⚪"
+        action_text = "WAIT"
+    
+    # Build message
+    message = f"""
+{emoji} <b>{context.symbol}</b> - {context.time[11:16]}
+
+<b>📊 SIGNAL: {action_text}</b>
+━━━━━━━━━━━━━━━━
+
+<b>🎯 Confidence: {context.confidence}%</b>
+
+<b>📈 Context:</b>
+├ OI: {context.future_oi}
+├ Depth: {context.depth_bias}
+├ Sector: {context.sector_bias}
+├ Market: {context.market_bias}
+└ Regime: {context.regime}
+
+<b>💹 VIX:</b> {context.vix_state}
+
+<b>⚡ Action:</b> {context.action}
+"""
+    
+    return message.strip()
+
+# =====================================================
 # MAIN ALERT ENGINE
 # =====================================================
 
 def process_alert(time_str: str, alert_conn) -> None:
     """Main alert generation logic"""
     
-    # Process BANKNIFTY_FUT
     for fut_token, fut_name in FUTURE_TOKENS.items():
-        symbol = fut_name.replace("_FUT", "")
+        try:
+            symbol = fut_name.replace("_FUT", "")
         
         # 1. Get analytics
         analytics = get_latest_analytics(symbol, time_str)
@@ -371,7 +463,7 @@ def process_alert(time_str: str, alert_conn) -> None:
         
         sector_bias = banking_signal if banking_signal == nbfc_signal else "MIXED"
         
-        # 5. CONFIRMATION: Index (simplified - use analytics)
+        # 5. CONFIRMATION: Index
         index_bias = "BULLISH" if analytics.get('bullish_percentage', 0) > 60 else \
                      "BEARISH" if analytics.get('bearish_percentage', 0) > 60 else "MIXED"
         
@@ -386,7 +478,7 @@ def process_alert(time_str: str, alert_conn) -> None:
         vix_value = analytics.get('vix_value', 15.0)
         if vix_value < LOW_VIX:
             vix_state = VixState.LOW
-        elif vix_value < 15:
+        elif vix_value < NORMAL_VIX:
             vix_state = VixState.NORMAL
         elif vix_value < HIGH_VIX:
             vix_state = VixState.HIGH
@@ -398,7 +490,7 @@ def process_alert(time_str: str, alert_conn) -> None:
             oi_category, depth_bias, sector_bias, index_bias, regime, vix_state
         )
         
-        # 9. ONE-CANDLE-ONE-DECISION: Check if already alerted
+        # 9. ONE-CANDLE-ONE-DECISION
         cur = alert_conn.cursor()
         cur.execute("""
             SELECT COUNT(*) FROM alerts_final
@@ -406,7 +498,7 @@ def process_alert(time_str: str, alert_conn) -> None:
         """, (symbol, time_str))
         
         if cur.fetchone()[0] > 0:
-            continue  # Already alerted
+            continue
         
         # 10. THRESHOLD CHECK
         if confidence < MIN_CONFIDENCE:
@@ -418,36 +510,79 @@ def process_alert(time_str: str, alert_conn) -> None:
         if action == Action.NO_TRADE:
             continue
         
-        # 12. WRITE ALERT
+        # 12. CREATE CONTEXT
         market_bias = f"Banking:{banking_signal}|NBFC:{nbfc_signal}"
+        
+        context = MarketContext(
+            time=time_str,
+            symbol=symbol,
+            future_oi=oi_category,
+            depth_bias=depth_bias.value,
+            index_bias=index_bias,
+            sector_bias=sector_bias,
+            market_bias=market_bias,
+            regime=regime.value,
+            vix_state=vix_state.value,
+            confidence=confidence,
+            action=action.value
+        )
+        
+        # 13. SEND TO TELEGRAM FIRST
+        telegram_msg = format_telegram_alert(context)
+        priority = "HIGH" if confidence >= 75 else "MEDIUM"
+        send_telegram(telegram_msg, priority)
+        
+        # 14. WRITE TO DATABASE (with telegram status)
+        telegram_status = 1 if TELEGRAM_ENABLED else 0
         
         cur.execute("""
             INSERT INTO alerts_final
             (time, symbol, future_oi_category, depth_bias, index_bias,
-             sector_bias, market_bias, regime, vix_state, confidence, recommended_action)
-            VALUES (?,?,?,?,?,?,?,?,?,?,?)
+             sector_bias, market_bias, regime, vix_state, confidence, 
+             recommended_action, telegram_sent)
+            VALUES (?,?,?,?,?,?,?,?,?,?,?,?)
         """, (
-            time_str, symbol,
-            oi_category, depth_bias.value, index_bias,
-            sector_bias, market_bias, regime.value, vix_state.value,
-            confidence, action.value
+            context.time, context.symbol,
+            context.future_oi, context.depth_bias, context.index_bias,
+            context.sector_bias, context.market_bias, context.regime, context.vix_state,
+            context.confidence, context.action, telegram_status
         ))
         
         alert_conn.commit()
         
         print(f"✅ ALERT: {symbol} | {oi_category} | {action.value} | Conf:{confidence}")
+        
+        except Exception as e:
+            print(f"[ALERT ERR] {symbol}: {e}")
+            import traceback
+            traceback.print_exc()
+            continue
 
 # =====================================================
 # MAIN LOOP
 # =====================================================
 
 def main():
-    print("🚀 Professional Alert Engine v1.0 Started")
+    print("🚀 Professional Alert Engine v2.0 Started")
     print("📊 Mode: Context-Aware Market Decision System")
+    print(f"📱 Telegram: {'✅ ENABLED' if TELEGRAM_ENABLED else '❌ DISABLED'}")
+    
+    # Send startup notification
+    if TELEGRAM_ENABLED:
+        send_telegram("""
+🚀 <b>Alert Engine Started</b>
+
+✅ System: ONLINE
+📊 Mode: Context-Aware
+🎯 Min Confidence: 55%
+
+Ready to monitor markets...
+""", "MEDIUM")
     
     alert_conn = init_alert_db()
-    
     last_processed_time = None
+    error_count = 0
+    MAX_ERRORS = 5
     
     while True:
         try:
@@ -470,14 +605,25 @@ def main():
                 if latest_time != last_processed_time:
                     process_alert(latest_time, alert_conn)
                     last_processed_time = latest_time
+                    error_count = 0  # Reset on success
             
-            time.sleep(60)  # Check every minute
+            time.sleep(60)
             
         except KeyboardInterrupt:
             print("\n🛑 Shutting down...")
+            if TELEGRAM_ENABLED:
+                send_telegram("🛑 <b>Alert Engine Stopped</b>\n\nManual shutdown", "MEDIUM")
             break
+            
         except Exception as e:
+            error_count += 1
             print(f"❌ Error: {e}")
+            
+            if error_count >= MAX_ERRORS:
+                if TELEGRAM_ENABLED:
+                    send_telegram(f"⚠️ <b>Critical Error</b>\n\nEngine crashed: {e}", "HIGH")
+                break
+            
             time.sleep(5)
     
     alert_conn.close()

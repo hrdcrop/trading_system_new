@@ -58,6 +58,18 @@ echo "🚨 Starting Alert Engine..."
 nohup python3 alert_engine_pro.py > logs/alerts.log 2>&1 &
 sleep 5
 
+# Add these lines BEFORE "Starting API Server"
+
+echo "🔧 Starting Options Chain Analyzer..."
+nohup python3 options_chain_analyzer.py > logs/options_chain.log 2>&1 &
+sleep 5
+
+echo "📊 Starting Advanced Analytics..."
+nohup python3 advanced_analytics_engine.py > logs/advanced_analytics.log 2>&1 &
+sleep 5
+
+
+
 echo "🌐 Starting API Server..."
 nohup python3 api_server_step.py > logs/api_server.log 2>&1 &
 sleep 3

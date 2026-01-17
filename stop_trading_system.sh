@@ -8,7 +8,8 @@ pkill -f oi_category_builder.py
 pkill -f comprehensive_analytics_engine.py
 pkill -f alert_engine_pro.py
 pkill -f api_server_step.py
-
+pkill -f options_chain_analyzer.py
+pkill -f advanced_analytics_engine.py
 sleep 2
 
 echo "✅ All processes stopped"

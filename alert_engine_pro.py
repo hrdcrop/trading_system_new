@@ -1,13 +1,14 @@
 #!/usr/bin/env python3
 """
-PROFESSIONAL ALERT ENGINE v2.0 - WITH TELEGRAM
+PROFESSIONAL ALERT ENGINE v2.1 - WITH TELEGRAM + COOLDOWN
 Context-Aware Market Decision System
 
-NEW FEATURES:
+FEATURES:
 ✅ Telegram bot integration
 ✅ Mobile-friendly alerts
 ✅ Health monitoring
 ✅ Auto-retry on failure
+✅ Cooldown period to reduce noise (v2.1)
 """
 
 import sqlite3
@@ -53,6 +54,79 @@ ORDER_IMBALANCE_THRESHOLD = 100
 HIGH_VIX = 18
 NORMAL_VIX = 15
 LOW_VIX = 12
+
+# Cooldown Config (v2.1)
+ALERT_COOLDOWN_MINUTES = 5
+
+# =====================================================
+# COOLDOWN STATE (v2.1)
+# =====================================================
+
+# In-memory state to track cooldowns per symbol
+# Structure: {symbol: {"last_alert_time": str, "last_alert_action": str}}
+alert_cooldown_state = {}
+
+
+def is_in_cooldown(symbol: str, action: str, current_time_str: str) -> bool:
+    """
+    Check if an alert should be suppressed due to cooldown.
+    
+    Returns True if:
+    - Same action was fired within ALERT_COOLDOWN_MINUTES
+    
+    Returns False (allow alert) if:
+    - No previous alert for this symbol
+    - Previous alert was different action (reversal)
+    - Cooldown period has expired
+    """
+    if symbol not in alert_cooldown_state:
+        return False
+    
+    state = alert_cooldown_state[symbol]
+    last_time_str = state.get("last_alert_time")
+    last_action = state.get("last_alert_action")
+    
+    if not last_time_str or not last_action:
+        return False
+    
+    # Different action = reversal, allow immediately
+    if last_action != action:
+        return False
+    
+    # Parse timestamps and check cooldown
+    try:
+        current_time = datetime.strptime(current_time_str, "%Y-%m-%d %H:%M:%S")
+        last_time = datetime.strptime(last_time_str, "%Y-%m-%d %H:%M:%S")
+        
+        elapsed_minutes = (current_time - last_time).total_seconds() / 60
+        
+        if elapsed_minutes < ALERT_COOLDOWN_MINUTES:
+            return True  # Still in cooldown
+        
+    except ValueError as e:
+        # If timestamp parsing fails, allow the alert
+        print(f"[COOLDOWN] Timestamp parse error: {e}")
+        return False
+    
+    return False
+
+
+def update_cooldown_state(symbol: str, action: str, time_str: str) -> None:
+    """
+    Update cooldown state after an alert is fired.
+    """
+    alert_cooldown_state[symbol] = {
+        "last_alert_time": time_str,
+        "last_alert_action": action
+    }
+
+
+def get_cooldown_status() -> Dict:
+    """
+    Get current cooldown state for debugging/monitoring.
+    """
+    return alert_cooldown_state.copy()
+
 
 # =====================================================
 # TELEGRAM INTEGRATION
@@ -428,129 +502,139 @@ def process_alert(time_str: str, alert_conn) -> None:
     for fut_token, fut_name in FUTURE_TOKENS.items():
         try:
             symbol = fut_name.replace("_FUT", "")
-        
-        # 1. Get analytics
-        analytics = get_latest_analytics(symbol, time_str)
-        if not analytics:
-            continue
-        
-        # 2. ANCHOR: OI Category
-        oi_category = get_oi_category(fut_token, time_str)
-        
-        # 3. TRIGGER: Depth Analysis
-        bid_ask_ratio = analytics.get('bid_ask_ratio', 1.0)
-        order_imbalance = analytics.get('order_imbalance', 0)
-        
-        if bid_ask_ratio >= BID_ASK_BUY_THRESHOLD and order_imbalance >= ORDER_IMBALANCE_THRESHOLD:
-            depth_bias = DepthBias.BUYER_DOMINANT
-        elif bid_ask_ratio <= BID_ASK_SELL_THRESHOLD and order_imbalance <= -ORDER_IMBALANCE_THRESHOLD:
-            depth_bias = DepthBias.SELLER_DOMINANT
-        else:
-            depth_bias = DepthBias.NEUTRAL
-        
-        # Skip if no signal
-        if oi_category == "NA" and depth_bias == DepthBias.NEUTRAL:
-            continue
-        
-        # 4. CONFIRMATION: Sector
-        sectors = get_sector_analysis(time_str)
-        banking = sectors.get("BANKING", {})
-        nbfc = sectors.get("NBFC", {})
-        
-        banking_signal = banking.get("signal", "NEUTRAL")
-        nbfc_signal = nbfc.get("signal", "NEUTRAL")
-        
-        sector_bias = banking_signal if banking_signal == nbfc_signal else "MIXED"
-        
-        # 5. CONFIRMATION: Index
-        index_bias = "BULLISH" if analytics.get('bullish_percentage', 0) > 60 else \
-                     "BEARISH" if analytics.get('bearish_percentage', 0) > 60 else "MIXED"
-        
-        # 6. CONTEXT: Regime
-        regime_str = analytics.get('market_regime', 'RANGING')
-        try:
-            regime = MarketRegime[regime_str]
-        except:
-            regime = MarketRegime.RANGING
-        
-        # 7. CONTEXT: VIX
-        vix_value = analytics.get('vix_value', 15.0)
-        if vix_value < LOW_VIX:
-            vix_state = VixState.LOW
-        elif vix_value < NORMAL_VIX:
-            vix_state = VixState.NORMAL
-        elif vix_value < HIGH_VIX:
-            vix_state = VixState.HIGH
-        else:
-            vix_state = VixState.EXTREME
-        
-        # 8. CONFIDENCE SCORE
-        confidence = calculate_confidence(
-            oi_category, depth_bias, sector_bias, index_bias, regime, vix_state
-        )
-        
-        # 9. ONE-CANDLE-ONE-DECISION
-        cur = alert_conn.cursor()
-        cur.execute("""
-            SELECT COUNT(*) FROM alerts_final
-            WHERE symbol = ? AND time = ?
-        """, (symbol, time_str))
-        
-        if cur.fetchone()[0] > 0:
-            continue
-        
-        # 10. THRESHOLD CHECK
-        if confidence < MIN_CONFIDENCE:
-            continue
-        
-        # 11. ACTION MAPPING
-        action = map_action(oi_category, depth_bias, regime, vix_state, confidence)
-        
-        if action == Action.NO_TRADE:
-            continue
-        
-        # 12. CREATE CONTEXT
-        market_bias = f"Banking:{banking_signal}|NBFC:{nbfc_signal}"
-        
-        context = MarketContext(
-            time=time_str,
-            symbol=symbol,
-            future_oi=oi_category,
-            depth_bias=depth_bias.value,
-            index_bias=index_bias,
-            sector_bias=sector_bias,
-            market_bias=market_bias,
-            regime=regime.value,
-            vix_state=vix_state.value,
-            confidence=confidence,
-            action=action.value
-        )
-        
-        # 13. SEND TO TELEGRAM FIRST
-        telegram_msg = format_telegram_alert(context)
-        priority = "HIGH" if confidence >= 75 else "MEDIUM"
-        send_telegram(telegram_msg, priority)
-        
-        # 14. WRITE TO DATABASE (with telegram status)
-        telegram_status = 1 if TELEGRAM_ENABLED else 0
-        
-        cur.execute("""
-            INSERT INTO alerts_final
-            (time, symbol, future_oi_category, depth_bias, index_bias,
-             sector_bias, market_bias, regime, vix_state, confidence, 
-             recommended_action, telegram_sent)
-            VALUES (?,?,?,?,?,?,?,?,?,?,?,?)
-        """, (
-            context.time, context.symbol,
-            context.future_oi, context.depth_bias, context.index_bias,
-            context.sector_bias, context.market_bias, context.regime, context.vix_state,
-            context.confidence, context.action, telegram_status
-        ))
-        
-        alert_conn.commit()
-        
-        print(f"✅ ALERT: {symbol} | {oi_category} | {action.value} | Conf:{confidence}")
-        
+            
+            # 1. Get analytics
+            analytics = get_latest_analytics(symbol, time_str)
+            if not analytics:
+                continue
+            
+            # 2. ANCHOR: OI Category
+            oi_category = get_oi_category(fut_token, time_str)
+            
+            # 3. TRIGGER: Depth Analysis
+            bid_ask_ratio = analytics.get('bid_ask_ratio', 1.0)
+            order_imbalance = analytics.get('order_imbalance', 0)
+            
+            if bid_ask_ratio >= BID_ASK_BUY_THRESHOLD and order_imbalance >= ORDER_IMBALANCE_THRESHOLD:
+                depth_bias = DepthBias.BUYER_DOMINANT
+            elif bid_ask_ratio <= BID_ASK_SELL_THRESHOLD and order_imbalance <= -ORDER_IMBALANCE_THRESHOLD:
+                depth_bias = DepthBias.SELLER_DOMINANT
+            else:
+                depth_bias = DepthBias.NEUTRAL
+            
+            # Skip if no signal
+            if oi_category == "NA" and depth_bias == DepthBias.NEUTRAL:
+                continue
+            
+            # 4. CONFIRMATION: Sector
+            sectors = get_sector_analysis(time_str)
+            banking = sectors.get("BANKING", {})
+            nbfc = sectors.get("NBFC", {})
+            
+            banking_signal = banking.get("signal", "NEUTRAL")
+            nbfc_signal = nbfc.get("signal", "NEUTRAL")
+            
+            sector_bias = banking_signal if banking_signal == nbfc_signal else "MIXED"
+            
+            # 5. CONFIRMATION: Index
+            index_bias = "BULLISH" if analytics.get('bullish_percentage', 0) > 60 else \
+                         "BEARISH" if analytics.get('bearish_percentage', 0) > 60 else "MIXED"
+            
+            # 6. CONTEXT: Regime
+            regime_str = analytics.get('market_regime', 'RANGING')
+            try:
+                regime = MarketRegime[regime_str]
+            except:
+                regime = MarketRegime.RANGING
+            
+            # 7. CONTEXT: VIX
+            vix_value = analytics.get('vix_value', 15.0)
+            if vix_value < LOW_VIX:
+                vix_state = VixState.LOW
+            elif vix_value < NORMAL_VIX:
+                vix_state = VixState.NORMAL
+            elif vix_value < HIGH_VIX:
+                vix_state = VixState.HIGH
+            else:
+                vix_state = VixState.EXTREME
+            
+            # 8. CONFIDENCE SCORE
+            confidence = calculate_confidence(
+                oi_category, depth_bias, sector_bias, index_bias, regime, vix_state
+            )
+            
+            # 9. ONE-CANDLE-ONE-DECISION
+            cur = alert_conn.cursor()
+            cur.execute("""
+                SELECT COUNT(*) FROM alerts_final
+                WHERE symbol = ? AND time = ?
+            """, (symbol, time_str))
+            
+            if cur.fetchone()[0] > 0:
+                continue
+            
+            # 10. THRESHOLD CHECK
+            if confidence < MIN_CONFIDENCE:
+                continue
+            
+            # 11. ACTION MAPPING
+            action = map_action(oi_category, depth_bias, regime, vix_state, confidence)
+            
+            if action == Action.NO_TRADE:
+                continue
+            
+            # 12. COOLDOWN CHECK (v2.1)
+            # Skip if same action is within cooldown period
+            # Reversals (different action) bypass cooldown
+            if is_in_cooldown(symbol, action.value, time_str):
+                print(f"⏸️ COOLDOWN: {symbol} | {action.value} | Suppressed (same signal within {ALERT_COOLDOWN_MINUTES}min)")
+                continue
+            
+            # 13. CREATE CONTEXT
+            market_bias = f"Banking:{banking_signal}|NBFC:{nbfc_signal}"
+            
+            context = MarketContext(
+                time=time_str,
+                symbol=symbol,
+                future_oi=oi_category,
+                depth_bias=depth_bias.value,
+                index_bias=index_bias,
+                sector_bias=sector_bias,
+                market_bias=market_bias,
+                regime=regime.value,
+                vix_state=vix_state.value,
+                confidence=confidence,
+                action=action.value
+            )
+            
+            # 14. SEND TO TELEGRAM FIRST
+            telegram_msg = format_telegram_alert(context)
+            priority = "HIGH" if confidence >= 75 else "MEDIUM"
+            send_telegram(telegram_msg, priority)
+            
+            # 15. UPDATE COOLDOWN STATE (v2.1)
+            update_cooldown_state(symbol, action.value, time_str)
+            
+            # 16. WRITE TO DATABASE (with telegram status)
+            telegram_status = 1 if TELEGRAM_ENABLED else 0
+            
+            cur.execute("""
+                INSERT INTO alerts_final
+                (time, symbol, future_oi_category, depth_bias, index_bias,
+                 sector_bias, market_bias, regime, vix_state, confidence, 
+                 recommended_action, telegram_sent)
+                VALUES (?,?,?,?,?,?,?,?,?,?,?,?)
+            """, (
+                context.time, context.symbol,
+                context.future_oi, context.depth_bias, context.index_bias,
+                context.sector_bias, context.market_bias, context.regime, context.vix_state,
+                context.confidence, context.action, telegram_status
+            ))
+            
+            alert_conn.commit()
+            
+            print(f"✅ ALERT: {symbol} | {oi_category} | {action.value} | Conf:{confidence}")
+            
         except Exception as e:
             print(f"[ALERT ERR] {symbol}: {e}")
             import traceback
@@ -562,18 +646,20 @@ def process_alert(time_str: str, alert_conn) -> None:
 # =====================================================
 
 def main():
-    print("🚀 Professional Alert Engine v2.0 Started")
+    print("🚀 Professional Alert Engine v2.1 Started")
     print("📊 Mode: Context-Aware Market Decision System")
     print(f"📱 Telegram: {'✅ ENABLED' if TELEGRAM_ENABLED else '❌ DISABLED'}")
+    print(f"⏱️ Cooldown: {ALERT_COOLDOWN_MINUTES} minutes (same signal)")
     
     # Send startup notification
     if TELEGRAM_ENABLED:
-        send_telegram("""
-🚀 <b>Alert Engine Started</b>
+        send_telegram(f"""
+🚀 <b>Alert Engine v2.1 Started</b>
 
 ✅ System: ONLINE
 📊 Mode: Context-Aware
-🎯 Min Confidence: 55%
+🎯 Min Confidence: {MIN_CONFIDENCE}%
+⏱️ Cooldown: {ALERT_COOLDOWN_MINUTES}min
 
 Ready to monitor markets...
 """, "MEDIUM")

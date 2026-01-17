@@ -2,6 +2,9 @@
 
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import HTMLResponse
+from fastapi import FastAPI, HTTPException
+from fastapi.middleware.cors import CORSMiddleware
 import sqlite3
 from typing import List, Optional
 from datetime import datetime, timedelta
@@ -427,6 +430,31 @@ def get_indicator_timeseries(symbol: str, hours: int = 1):
     
     return [dict(row) for row in rows]
 
+
+
+# =====================================================
+# ROOT: DASHBOARD UI
+# =====================================================
+
+from fastapi.responses import HTMLResponse
+
+@app.get("/", response_class=HTMLResponse)
+def serve_dashboard():
+    try:
+        with open("trading_dashboard_pro.html", "r", encoding="utf-8") as f:
+            return f.read()
+    except Exception as e:
+        return f"""
+        <html>
+        <body style="background:#0a0e17;color:#f9fafb;font-family:Arial">
+            <h2>Dashboard Load Error</h2>
+            <p>File: trading_dashboard_pro.html</p>
+            <p>Error: {str(e)}</p>
+        </body>
+        </html>
+        """
+
+
 # =====================================================
 # HEALTH CHECK
 # =====================================================
@@ -463,6 +491,217 @@ def health_check():
             "status": "unhealthy",
             "error": str(e)
         }
+
+
+# ===== NEW ENDPOINTS =====
+
+@app.get("/options/latest/{symbol}")
+def get_latest_options(symbol: str):
+    """Get latest options analysis"""
+    conn = sqlite3.connect("options_chain.db")
+    conn.row_factory = sqlite3.Row
+    cur = conn.cursor()
+    
+    cur.execute("""
+        SELECT * FROM options_analysis
+        WHERE symbol = ?
+        ORDER BY timestamp DESC
+        LIMIT 1
+    """, (symbol,))
+    
+    row = cur.fetchone()
+    conn.close()
+    
+    return dict(row) if row else {}
+
+@app.get("/advanced/support-resistance/{symbol}")
+def get_support_resistance(symbol: str):
+    """Get latest support/resistance levels"""
+    conn = sqlite3.connect("advanced_analytics.db")
+    conn.row_factory = sqlite3.Row
+    cur = conn.cursor()
+    
+    cur.execute("""
+        SELECT * FROM support_resistance
+        WHERE symbol = ?
+        ORDER BY timestamp DESC
+        LIMIT 1
+    """, (symbol,))
+    
+    row = cur.fetchone()
+    conn.close()
+    
+    return dict(row) if row else {}
+
+@app.get("/advanced/patterns/{symbol}")
+def get_patterns(symbol: str):
+    """Get detected patterns"""
+    conn = sqlite3.connect("advanced_analytics.db")
+    conn.row_factory = sqlite3.Row
+    cur = conn.cursor()
+    
+    cur.execute("""
+        SELECT * FROM pattern_signals
+        WHERE symbol = ?
+        ORDER BY timestamp DESC
+        LIMIT 5
+    """, (symbol,))
+    
+    rows = cur.fetchall()
+    conn.close()
+    
+    return [dict(row) for row in rows]
+
+
+# =====================================================
+# ADVANCED ANALYTICS ENDPOINTS
+# =====================================================
+
+@app.get("/advanced/fibonacci/{symbol}")
+def get_fibonacci(symbol: str):
+    """Get fibonacci levels"""
+    try:
+        conn = sqlite3.connect("advanced_analytics.db")
+        conn.row_factory = sqlite3.Row
+        cur = conn.cursor()
+        
+        cur.execute("""
+            SELECT * FROM fibonacci_levels
+            WHERE symbol = ?
+            ORDER BY timestamp DESC
+            LIMIT 1
+        """, (symbol,))
+        
+        row = cur.fetchone()
+        conn.close()
+        
+        if row:
+            return dict(row)
+        return {"message": "No fibonacci data available yet"}
+    except Exception as e:
+        return {"error": str(e), "message": "Table might not exist yet"}
+
+@app.get("/advanced/support-resistance/{symbol}")
+def get_sr_levels(symbol: str):
+    """Get support/resistance levels"""
+    try:
+        conn = sqlite3.connect("advanced_analytics.db")
+        conn.row_factory = sqlite3.Row
+        cur = conn.cursor()
+        
+        cur.execute("""
+            SELECT * FROM support_resistance
+            WHERE symbol = ?
+            ORDER BY timestamp DESC
+            LIMIT 1
+        """, (symbol,))
+        
+        row = cur.fetchone()
+        conn.close()
+        
+        if row:
+            return dict(row)
+        return {"message": "No support/resistance data available yet"}
+    except Exception as e:
+        return {"error": str(e), "message": "Table might not exist yet"}
+
+@app.get("/advanced/patterns/{symbol}")
+def get_chart_patterns(symbol: str):
+    """Get detected patterns"""
+    try:
+        conn = sqlite3.connect("advanced_analytics.db")
+        conn.row_factory = sqlite3.Row
+        cur = conn.cursor()
+        
+        cur.execute("""
+            SELECT * FROM pattern_signals
+            WHERE symbol = ?
+            ORDER BY timestamp DESC
+            LIMIT 5
+        """, (symbol,))
+        
+        rows = cur.fetchall()
+        conn.close()
+        
+        if rows:
+            return [dict(row) for row in rows]
+        return {"message": "No patterns detected yet"}
+    except Exception as e:
+        return {"error": str(e), "message": "Table might not exist yet"}
+
+@app.get("/advanced/pivot-points/{symbol}")
+def get_pivots(symbol: str):
+    """Get pivot points"""
+    try:
+        conn = sqlite3.connect("advanced_analytics.db")
+        conn.row_factory = sqlite3.Row
+        cur = conn.cursor()
+        
+        cur.execute("""
+            SELECT * FROM pivot_points
+            WHERE symbol = ?
+            ORDER BY date DESC
+            LIMIT 1
+        """, (symbol,))
+        
+        row = cur.fetchone()
+        conn.close()
+        
+        if row:
+            return dict(row)
+        return {"message": "No pivot points data available yet"}
+    except Exception as e:
+        return {"error": str(e), "message": "Table might not exist yet"}
+
+@app.get("/advanced/volume-profile/{symbol}")
+def get_vol_profile(symbol: str):
+    """Get volume profile"""
+    try:
+        conn = sqlite3.connect("advanced_analytics.db")
+        conn.row_factory = sqlite3.Row
+        cur = conn.cursor()
+        
+        cur.execute("""
+            SELECT * FROM volume_profile
+            WHERE symbol = ?
+            ORDER BY timestamp DESC
+            LIMIT 1
+        """, (symbol,))
+        
+        row = cur.fetchone()
+        conn.close()
+        
+        if row:
+            return dict(row)
+        return {"message": "No volume profile data available yet"}
+    except Exception as e:
+        return {"error": str(e), "message": "Table might not exist yet"}
+
+@app.get("/options/latest/{symbol}")
+def get_options_data(symbol: str):
+    """Get options chain analysis"""
+    try:
+        conn = sqlite3.connect("options_chain.db")
+        conn.row_factory = sqlite3.Row
+        cur = conn.cursor()
+        
+        cur.execute("""
+            SELECT * FROM options_analysis
+            WHERE symbol = ?
+            ORDER BY timestamp DESC
+            LIMIT 1
+        """, (symbol,))
+        
+        row = cur.fetchone()
+        conn.close()
+        
+        if row:
+            return dict(row)
+        return {"message": "No options data available yet"}
+    except Exception as e:
+        return {"error": str(e), "message": "Table might not exist yet"}
+
+
 
 if __name__ == "__main__":
     import uvicorn
