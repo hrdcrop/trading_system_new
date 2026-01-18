@@ -1,7 +1,6 @@
 #!/usr/bin/env python3
 
 from secrets import KITE_API_KEY, KITE_ACCESS_TOKEN
-
 from kiteconnect import KiteTicker, KiteConnect
 import sqlite3
 import json
@@ -14,16 +13,10 @@ import sys
 # CONFIG
 # =====================================================
 
-kite = KiteConnect(api_key=KITE_API_KEY)
-kite.set_access_token(KITE_ACCESS_TOKEN)
-
-kws = KiteTicker(KITE_API_KEY, KITE_ACCESS_TOKEN)
-
-
 DB_NAME = "tick_json_data.db"
 IST = pytz.timezone("Asia/Kolkata")
 
-# ---- ACTIVE TOKENS (UNCHANGED – 19 TOKENS) ----
+# ---- ACTIVE TOKENS (19 TOKENS) ----
 TOKENS = {
     12601346: "BANKNIFTY",
     12602626: "NIFTY",
@@ -75,10 +68,10 @@ conn.commit()
 # KITE SETUP
 # =====================================================
 
-kite = KiteConnect(api_key=API_KEY)
-kite.set_access_token(ACCESS_TOKEN)
+kite = KiteConnect(api_key=KITE_API_KEY)
+kite.set_access_token(KITE_ACCESS_TOKEN)
 
-kws = KiteTicker(API_KEY, ACCESS_TOKEN)
+kws = KiteTicker(KITE_API_KEY, KITE_ACCESS_TOKEN)
 
 # =====================================================
 # SAFE EXIT HANDLER
