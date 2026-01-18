@@ -27,3 +27,4 @@ secrets.py
 # === EDITOR TEMP FILES ===
 *.swp
 *.swo
+*.backup
