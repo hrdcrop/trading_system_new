@@ -7,10 +7,10 @@ echo ""
 processes=(
     "tick_json_saver.py:Tick Capture"
     "candle_builder_1m.py:Candle Builder"
-    "oi_category_builder.py:OI Analyzer"
+    "oi_category_builder_v2.py:OI Analyzer"
     "comprehensive_analytics_engine.py:Analytics Engine"
     "alert_engine_pro.py:Alert Engine"
-    "api_server_step.py:API Server"
+    "api_server.py:API Server"
 )
 
 running=0
