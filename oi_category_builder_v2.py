@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """
-1-Minute Candle Builder - DAEMON MODE
-======================================
-Continuously processes tick data into enriched 1-minute candles
-Runs every 10 seconds to catch new complete minutes
+OI Category Builder v2 - PRODUCTION HARDENED DAEMON
+Reads ONLY from tick_json_data.db (parallel to candle_builder_1m.py)
+Computes OI categories for BANKNIFTY and NIFTY futures only
+Runs continuously as a daemon with graceful shutdown support
 """
 
 import sqlite3
@@ -13,362 +13,350 @@ import signal
 import sys
 from datetime import datetime
 from collections import defaultdict
+import pytz
 
-# ============================================================================
-# CONFIGURATION
-# ============================================================================
-
+# Database paths
 SOURCE_DB = "tick_json_data.db"
-OUTPUT_DB = "minute_candles.db"
-PROCESSING_INTERVAL = 10  # seconds between processing cycles
+OUTPUT_DB = "oi_analysis.db"
 
-# Optional: Filter for specific instruments
-ALLOWED_TOKENS = None  # Set to {12601346, 12602626} for BANKNIFTY/NIFTY only
+# STRICT: Only these instrument tokens are allowed
+ALLOWED_FUTURES = {
+    12601346,  # BANKNIFTY
+    12602626   # NIFTY
+}
 
-# Bias classification thresholds
-BUYER_THRESHOLD = 1.2
-SELLER_THRESHOLD = 0.8
-
-# Priority weights for depth levels
-DEPTH_WEIGHTS = [1.0, 0.8, 0.6, 0.4, 0.2]
+# Daemon configuration
+SLEEP_INTERVAL = 10  # seconds between cycles
 
 # Graceful shutdown flag
 shutdown_requested = False
 
-# ============================================================================
-# SIGNAL HANDLERS
-# ============================================================================
+# IST timezone for logging (does not affect data processing)
+IST = pytz.timezone('Asia/Kolkata')
+
+
+def now_ist_str():
+    """Get current time in IST as formatted string for logging only"""
+    return datetime.now(IST).strftime('%Y-%m-%d %H:%M:%S')
+
 
 def signal_handler(signum, frame):
-    """Handle shutdown signals gracefully"""
+    """Handle SIGINT and SIGTERM for graceful shutdown"""
     global shutdown_requested
-    print(f"\n🛑 Received signal {signum}, initiating graceful shutdown...")
+    print(f"\n[{now_ist_str()}] Shutdown signal received, finishing current cycle...")
     shutdown_requested = True
 
-signal.signal(signal.SIGTERM, signal_handler)
-signal.signal(signal.SIGINT, signal_handler)
-
-# ============================================================================
-# DATABASE INITIALIZATION
-# ============================================================================
 
 def init_output_db():
-    """Initialize output database with production schema"""
+    """Initialize output database with schema"""
     conn = sqlite3.connect(OUTPUT_DB)
     cursor = conn.cursor()
-
+    
     cursor.execute("""
-        CREATE TABLE IF NOT EXISTS minute_candles (
+        CREATE TABLE IF NOT EXISTS futures_oi_category_1m (
             instrument_token INTEGER NOT NULL,
             time_minute TEXT NOT NULL,
-            open REAL NOT NULL,
-            high REAL NOT NULL,
-            low REAL NOT NULL,
-            close REAL NOT NULL,
-            volume INTEGER NOT NULL,
-            total_bid_qty INTEGER,
-            total_ask_qty INTEGER,
-            bid_ask_ratio REAL,
-            order_imbalance INTEGER,
-            bid_ask_bias TEXT,
-            weighted_bid_qty REAL,
-            weighted_ask_qty REAL,
-            weighted_bid_ask_ratio REAL,
-            weighted_order_imbalance REAL,
-            weighted_bias TEXT,
+            price_start REAL NOT NULL,
+            price_end REAL NOT NULL,
+            oi_start INTEGER NOT NULL,
+            oi_end INTEGER NOT NULL,
+            price_change REAL NOT NULL,
+            oi_change INTEGER NOT NULL,
+            oi_category TEXT NOT NULL,
             PRIMARY KEY (instrument_token, time_minute)
         )
     """)
-
+    
+    # Index for faster time-based queries
     cursor.execute("""
-        CREATE INDEX IF NOT EXISTS idx_time_minute
-        ON minute_candles(time_minute)
+        CREATE INDEX IF NOT EXISTS idx_time_minute 
+        ON futures_oi_category_1m(time_minute)
     """)
-
-    cursor.execute("""
-        CREATE INDEX IF NOT EXISTS idx_instrument
-        ON minute_candles(instrument_token)
-    """)
-
+    
     conn.commit()
     conn.close()
+    print(f"✓ Initialized {OUTPUT_DB}")
+
+
+def get_oi_category(price_change, oi_change):
+    """
+    Determine OI category based on price and OI changes
+    
+    SKIP if either change is zero (no clear directional signal)
+    
+    Returns:
+        str or None: Category code or None if conditions not met
+    """
+    # MANDATORY: Skip if no change in price or OI
+    if price_change == 0 or oi_change == 0:
+        return None
+    
+    if price_change > 0 and oi_change > 0:
+        return "LB"  # Long Build-up
+    elif price_change < 0 and oi_change > 0:
+        return "SB"  # Short Build-up
+    elif price_change > 0 and oi_change < 0:
+        return "SC"  # Short Covering
+    elif price_change < 0 and oi_change < 0:
+        return "LU"  # Long Unwinding
+    else:
+        return None
+
 
 def parse_ist_minute(ts_ist_str):
-    """Extract IST minute bucket from timestamp string"""
+    """
+    Extract IST minute bucket from timestamp string
+    ts_ist is ALREADY in IST - no timezone conversion needed
+    
+    Args:
+        ts_ist_str: Timestamp string in IST (e.g., "2026-01-17 09:21:34")
+    
+    Returns:
+        str: Minute bucket in format "YYYY-MM-DD HH:MM"
+    """
+    # Parse and truncate to minute (no timezone conversion - already IST)
     dt = datetime.strptime(ts_ist_str, "%Y-%m-%d %H:%M:%S")
     return dt.strftime("%Y-%m-%d %H:%M")
 
-def compute_depth_metrics(depth_array, weights):
-    """Compute total and priority-weighted quantities from depth array"""
-    if not depth_array or not isinstance(depth_array, list):
-        return 0, 0.0
 
-    total_qty = 0
-    weighted_qty = 0.0
-
-    for i, level in enumerate(depth_array):
-        if not isinstance(level, dict):
-            continue
-        qty = level.get('quantity', 0)
-        total_qty += qty
-        if i < len(weights):
-            weighted_qty += qty * weights[i]
-
-    return total_qty, weighted_qty
-
-def extract_last_tick_depth(tick_json_str):
-    """Extract depth metrics from last tick snapshot"""
+def process_minute_data(minute_ticks):
+    """
+    Process ticks for a single minute bucket
+    
+    Args:
+        minute_ticks: List of (ts_ist, tick_json_str) tuples, sorted by timestamp
+    
+    Returns:
+        dict or None: Calculated metrics or None if insufficient/invalid data
+    """
+    # MANDATORY: Need at least 2 ticks (first and last)
+    if len(minute_ticks) < 2:
+        return None
+    
+    # Parse first and last tick JSON
     try:
-        tick_data = json.loads(tick_json_str)
-        bid_depth = tick_data.get('bid', [])
-        ask_depth = tick_data.get('ask', [])
-        
-        total_bid_qty, weighted_bid_qty = compute_depth_metrics(bid_depth, DEPTH_WEIGHTS)
-        total_ask_qty, weighted_ask_qty = compute_depth_metrics(ask_depth, DEPTH_WEIGHTS)
-        
-        return {
-            'total_bid_qty': total_bid_qty,
-            'total_ask_qty': total_ask_qty,
-            'weighted_bid_qty': weighted_bid_qty,
-            'weighted_ask_qty': weighted_ask_qty
-        }
-    except (json.JSONDecodeError, AttributeError, KeyError):
-        return {
-            'total_bid_qty': 0,
-            'total_ask_qty': 0,
-            'weighted_bid_qty': 0.0,
-            'weighted_ask_qty': 0.0
-        }
-
-def calculate_bias(ratio, buyer_threshold, seller_threshold):
-    """Classify market bias based on bid/ask ratio"""
-    if ratio > buyer_threshold:
-        return "BUYER_DOMINANT"
-    elif ratio < seller_threshold:
-        return "SELLER_DOMINANT"
-    else:
-        return "NEUTRAL"
-
-def process_minute_candle(minute_ticks):
-    """Process all ticks for a single minute to create enriched candle"""
-    if len(minute_ticks) == 0:
-        return None
-
-    prices = []
-    volumes = []
-
-    for ts_ist, tick_json_str in minute_ticks:
-        try:
-            tick_data = json.loads(tick_json_str)
-            lp = tick_data.get('lp')
-            if lp is not None:
-                prices.append(lp)
-            vol = tick_data.get('vol')
-            if vol is not None:
-                volumes.append(vol)
-        except (json.JSONDecodeError, AttributeError):
-            continue
-
-    if len(prices) == 0:
-        return None
-
-    # OHLCV calculation
-    open_price = prices[0]
-    high_price = max(prices)
-    low_price = min(prices)
-    close_price = prices[-1]
-
-    if len(volumes) >= 2:
-        volume = volumes[-1] - volumes[0]
-        if volume < 0:
-            volume = volumes[-1]
-    elif len(volumes) == 1:
-        volume = volumes[0]
-    else:
-        volume = 0
-
-    # Depth calculation from last tick
-    last_tick_json = minute_ticks[-1][1]
-    depth_metrics = extract_last_tick_depth(last_tick_json)
-
-    total_bid_qty = depth_metrics['total_bid_qty']
-    total_ask_qty = depth_metrics['total_ask_qty']
-    weighted_bid_qty = depth_metrics['weighted_bid_qty']
-    weighted_ask_qty = depth_metrics['weighted_ask_qty']
-
-    # Total depth ratios
-    order_imbalance = total_bid_qty - total_ask_qty
-    if total_ask_qty > 0:
-        bid_ask_ratio = total_bid_qty / total_ask_qty
-    else:
-        bid_ask_ratio = 999.0 if total_bid_qty > 0 else 1.0
-    bid_ask_bias = calculate_bias(bid_ask_ratio, BUYER_THRESHOLD, SELLER_THRESHOLD)
-
-    # Weighted depth ratios
-    weighted_order_imbalance = weighted_bid_qty - weighted_ask_qty
-    if weighted_ask_qty > 0:
-        weighted_bid_ask_ratio = weighted_bid_qty / weighted_ask_qty
-    else:
-        weighted_bid_ask_ratio = 999.0 if weighted_bid_qty > 0 else 1.0
-    weighted_bias = calculate_bias(weighted_bid_ask_ratio, BUYER_THRESHOLD, SELLER_THRESHOLD)
-
+        first_tick_json = json.loads(minute_ticks[0][1])
+        last_tick_json = json.loads(minute_ticks[-1][1])
+    except (json.JSONDecodeError, IndexError):
+        return None  # Skip if JSON parsing fails
+    
+    # MANDATORY: Extract OI values (must exist and be valid)
+    oi_start = first_tick_json.get('oi')
+    oi_end = last_tick_json.get('oi')
+    
+    if oi_start is None or oi_end is None:
+        return None  # Skip if OI not present
+    
+    # MANDATORY: Extract price values (must exist and be valid)
+    price_start = first_tick_json.get('lp')
+    price_end = last_tick_json.get('lp')
+    
+    if price_start is None or price_end is None:
+        return None  # Skip if price not present
+    
+    # Calculate changes
+    price_change = price_end - price_start
+    oi_change = oi_end - oi_start
+    
+    # Determine category (returns None if price_change==0 or oi_change==0)
+    category = get_oi_category(price_change, oi_change)
+    
+    if category is None:
+        return None  # Skip neutral/no-change cases
+    
     return {
-        'open': open_price,
-        'high': high_price,
-        'low': low_price,
-        'close': close_price,
-        'volume': volume,
-        'total_bid_qty': total_bid_qty,
-        'total_ask_qty': total_ask_qty,
-        'bid_ask_ratio': round(bid_ask_ratio, 4),
-        'order_imbalance': order_imbalance,
-        'bid_ask_bias': bid_ask_bias,
-        'weighted_bid_qty': round(weighted_bid_qty, 2),
-        'weighted_ask_qty': round(weighted_ask_qty, 2),
-        'weighted_bid_ask_ratio': round(weighted_bid_ask_ratio, 4),
-        'weighted_order_imbalance': round(weighted_order_imbalance, 2),
-        'weighted_bias': weighted_bias
+        'price_start': price_start,
+        'price_end': price_end,
+        'oi_start': oi_start,
+        'oi_end': oi_end,
+        'price_change': price_change,
+        'oi_change': oi_change,
+        'oi_category': category
     }
 
-def get_last_completed_minute():
-    """Get the last fully completed minute from output database"""
+
+def get_last_processed_minute():
+    """
+    Get the last fully processed IST minute from output database
+    This enables incremental processing - only fetch newer ticks
+    
+    Returns:
+        str or None: Last processed time_minute (IST) or None if no data
+    """
     try:
         conn = sqlite3.connect(OUTPUT_DB)
         cursor = conn.cursor()
-        cursor.execute("SELECT MAX(time_minute) FROM minute_candles")
+        
+        # Get the maximum time_minute already processed
+        cursor.execute("""
+            SELECT MAX(time_minute)
+            FROM futures_oi_category_1m
+        """)
+        
         result = cursor.fetchone()[0]
         conn.close()
+        
         return result
     except sqlite3.OperationalError:
+        # Table doesn't exist yet
         return None
 
-def process_new_ticks(last_completed_minute=None):
-    """Process new ticks from tick_json_data.db"""
-    try:
-        source_conn = sqlite3.connect(SOURCE_DB, timeout=10)
-        source_cursor = source_conn.cursor()
-    except sqlite3.OperationalError as e:
-        print(f"⚠️  Cannot access {SOURCE_DB}: {e}")
-        return 0
 
-    query = "SELECT instrument_token, ts_ist, tick_json FROM ticks_json WHERE 1=1"
-
-    if ALLOWED_TOKENS is not None:
-        allowed_str = ','.join(str(t) for t in ALLOWED_TOKENS)
-        query += f" AND instrument_token IN ({allowed_str})"
-
-    if last_completed_minute:
-        query += f" AND strftime('%Y-%m-%d %H:%M', ts_ist) > '{last_completed_minute}'"
-
+def process_new_ticks(last_processed_minute=None):
+    """
+    Process new ticks from tick_json_data.db
+    INCREMENTAL: Only process ticks newer than last_processed_minute
+    
+    Args:
+        last_processed_minute: Last processed IST minute (format: "YYYY-MM-DD HH:MM")
+    
+    Returns:
+        tuple: (processed_count, skipped_count)
+    """
+    # Connect to source database
+    source_conn = sqlite3.connect(SOURCE_DB)
+    source_cursor = source_conn.cursor()
+    
+    # STRICT FILTERING at SQL level:
+    # 1. Only ALLOWED_FUTURES instrument tokens
+    # 2. Only ticks with OI present
+    # 3. Only ticks newer than last processed minute (INCREMENTAL)
+    
+    allowed_tokens_str = ','.join(str(t) for t in ALLOWED_FUTURES)
+    
+    query = f"""
+        SELECT instrument_token, ts_ist, tick_json
+        FROM ticks_json
+        WHERE instrument_token IN ({allowed_tokens_str})
+          AND json_extract(tick_json, '$.oi') IS NOT NULL
+    """
+    
+    # INCREMENTAL PROCESSING: Only fetch ticks after last processed minute
+    if last_processed_minute:
+        # Add 1 minute to avoid reprocessing the last minute
+        # Compare at minute level: ts_ist > "YYYY-MM-DD HH:MM:59"
+        query += f" AND ts_ist > '{last_processed_minute}:59'"
+    
     query += " ORDER BY ts_ist ASC"
-
+    
     source_cursor.execute(query)
-
+    
+    # Group ticks by instrument and IST minute bucket
+    # Structure: {instrument_token: {time_minute: [(ts_ist, tick_json), ...]}}
     minute_buckets = defaultdict(lambda: defaultdict(list))
+    
     total_ticks = 0
-
     for row in source_cursor:
         instrument_token, ts_ist, tick_json = row
-        if ALLOWED_TOKENS is not None and instrument_token not in ALLOWED_TOKENS:
+        
+        # DOUBLE VALIDATION: Ensure instrument is allowed (defense in depth)
+        if instrument_token not in ALLOWED_FUTURES:
             continue
+        
+        # Extract IST minute bucket (no timezone conversion - already IST)
         time_minute = parse_ist_minute(ts_ist)
+        
+        # Add to bucket
         minute_buckets[instrument_token][time_minute].append((ts_ist, tick_json))
         total_ticks += 1
-
+    
     source_conn.close()
-
-    if total_ticks == 0:
-        return 0
-
+    
+    # Process each instrument-minute bucket
     output_conn = sqlite3.connect(OUTPUT_DB)
     output_cursor = output_conn.cursor()
-
+    
     processed_count = 0
-
+    skipped_count = 0
+    
     for instrument_token, minutes in minute_buckets.items():
         for time_minute, ticks in minutes.items():
+            # Sort ticks by timestamp to ensure correct first/last order
             ticks_sorted = sorted(ticks, key=lambda x: x[0])
-            candle_data = process_minute_candle(ticks_sorted)
-
-            if candle_data is None:
+            
+            # Process minute data (returns None if invalid/insufficient)
+            result = process_minute_data(ticks_sorted)
+            
+            if result is None:
+                skipped_count += 1
                 continue
-
+            
+            # INSERT OR REPLACE for idempotent execution
+            # Safe to re-run - will update existing rows
             output_cursor.execute("""
-                INSERT OR REPLACE INTO minute_candles
-                (instrument_token, time_minute, open, high, low, close, volume,
-                 total_bid_qty, total_ask_qty, bid_ask_ratio, order_imbalance, bid_ask_bias,
-                 weighted_bid_qty, weighted_ask_qty, weighted_bid_ask_ratio,
-                 weighted_order_imbalance, weighted_bias)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                INSERT OR REPLACE INTO futures_oi_category_1m
+                (instrument_token, time_minute, price_start, price_end,
+                 oi_start, oi_end, price_change, oi_change, oi_category)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
             """, (
-                instrument_token, time_minute,
-                candle_data['open'], candle_data['high'], candle_data['low'],
-                candle_data['close'], candle_data['volume'],
-                candle_data['total_bid_qty'], candle_data['total_ask_qty'],
-                candle_data['bid_ask_ratio'], candle_data['order_imbalance'],
-                candle_data['bid_ask_bias'], candle_data['weighted_bid_qty'],
-                candle_data['weighted_ask_qty'], candle_data['weighted_bid_ask_ratio'],
-                candle_data['weighted_order_imbalance'], candle_data['weighted_bias']
+                instrument_token,
+                time_minute,
+                result['price_start'],
+                result['price_end'],
+                result['oi_start'],
+                result['oi_end'],
+                result['price_change'],
+                result['oi_change'],
+                result['oi_category']
             ))
+            
             processed_count += 1
-
+    
     output_conn.commit()
     output_conn.close()
-
-    return processed_count
-
-# ============================================================================
-# DAEMON MAIN LOOP
-# ============================================================================
-
-def main():
-    """Main daemon loop"""
-    print("=" * 80)
-    print("🕯️  1-Minute Candle Builder - DAEMON MODE")
-    print("=" * 80)
-    print(f"📊 Processing interval: {PROCESSING_INTERVAL} seconds")
-    print(f"📁 Source: {SOURCE_DB}")
-    print(f"📁 Output: {OUTPUT_DB}")
     
-    if ALLOWED_TOKENS:
-        print(f"🎯 Instruments: {sorted(ALLOWED_TOKENS)}")
-    else:
-        print(f"🎯 Instruments: ALL")
-    
-    print("=" * 80)
+    return processed_count, skipped_count
 
-    # Initialize database
+
+def run_daemon():
+    """Main daemon loop - runs continuously until shutdown"""
+    print("=" * 60)
+    print("OI Category Builder v2 - PRODUCTION DAEMON")
+    print("=" * 60)
+    print(f"Allowed instruments: {sorted(ALLOWED_FUTURES)}")
+    print(f"Sleep interval: {SLEEP_INTERVAL} seconds")
+    print("=" * 60)
+    
+    # Initialize output database once at startup
     init_output_db()
-    print("✅ Database initialized")
-
+    
     cycle_count = 0
     
+    # Daemon loop - runs until shutdown signal received
     while not shutdown_requested:
         cycle_count += 1
-        cycle_start = time.time()
+        cycle_start_time = now_ist_str()  # IST timestamp for logging
         
-        try:
-            # Get last processed minute
-            last_minute = get_last_completed_minute()
-            
-            # Process new data
-            processed = process_new_ticks(last_completed_minute=last_minute)
-            
-            cycle_duration = time.time() - cycle_start
-            
-            if processed > 0:
-                print(f"[{datetime.now().strftime('%H:%M:%S')}] "
-                      f"Cycle #{cycle_count}: Processed {processed} candles "
-                      f"({cycle_duration:.2f}s)")
-            
-        except Exception as e:
-            print(f"❌ Error in cycle #{cycle_count}: {e}")
+        print(f"\n[{cycle_start_time}] Starting cycle #{cycle_count}")
         
-        # Sleep until next cycle
-        time.sleep(PROCESSING_INTERVAL)
+        # Recompute last processed minute on every cycle for incremental processing
+        last_minute = get_last_processed_minute()
+        
+        # Process only new ticks (incremental)
+        processed, skipped = process_new_ticks(last_processed_minute=last_minute)
+        
+        # Log cycle results with IST timestamp
+        print(f"[{now_ist_str()}] Cycle #{cycle_count} complete: "
+              f"Processed {processed} minute-buckets, Skipped {skipped}")
+        
+        # Sleep before next cycle (unless shutdown requested)
+        if not shutdown_requested:
+            time.sleep(SLEEP_INTERVAL)
     
-    print("\n✅ Candle Builder stopped gracefully")
-    sys.exit(0)
+    # Shutdown confirmation with IST timestamp
+    print(f"\n[{now_ist_str()}] OI Category Builder daemon shutdown complete")
+    print("=" * 60)
+
+
+def main():
+    """Main execution flow"""
+    # Register signal handlers for graceful shutdown
+    signal.signal(signal.SIGINT, signal_handler)
+    signal.signal(signal.SIGTERM, signal_handler)
+    
+    # Run daemon
+    run_daemon()
+
 
 if __name__ == "__main__":
     main()

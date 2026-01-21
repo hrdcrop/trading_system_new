@@ -4,6 +4,7 @@
 ======================================
 Continuously processes tick data into enriched 1-minute candles
 Runs every 10 seconds to catch new complete minutes
+All timestamps are in IST (Asia/Kolkata)
 """
 
 import sqlite3
@@ -13,13 +14,17 @@ import signal
 import sys
 from datetime import datetime
 from collections import defaultdict
+import pytz
 
 # ============================================================================
 # CONFIGURATION
 # ============================================================================
 
+# IST timezone object for all datetime operations
+IST = pytz.timezone('Asia/Kolkata')
+
 SOURCE_DB = "tick_json_data.db"
-OUTPUT_DB = "minute_candles.db"
+OUTPUT_DB = "market_data.db"
 PROCESSING_INTERVAL = 10  # seconds between processing cycles
 
 # Optional: Filter for specific instruments
@@ -36,13 +41,25 @@ DEPTH_WEIGHTS = [1.0, 0.8, 0.6, 0.4, 0.2]
 shutdown_requested = False
 
 # ============================================================================
+# TIMEZONE HELPER
+# ============================================================================
+
+def now_ist():
+    """Get current datetime in IST timezone"""
+    return datetime.now(IST)
+
+def now_ist_str(fmt="%H:%M:%S"):
+    """Get current IST time as formatted string"""
+    return now_ist().strftime(fmt)
+
+# ============================================================================
 # SIGNAL HANDLERS
 # ============================================================================
 
 def signal_handler(signum, frame):
     """Handle shutdown signals gracefully"""
     global shutdown_requested
-    print(f"\n🛑 Received signal {signum}, initiating graceful shutdown...")
+    print(f"\n🛑 Received signal {signum}, initiating graceful shutdown... [{now_ist_str()}]")
     shutdown_requested = True
 
 signal.signal(signal.SIGTERM, signal_handler)
@@ -122,10 +139,10 @@ def extract_last_tick_depth(tick_json_str):
         tick_data = json.loads(tick_json_str)
         bid_depth = tick_data.get('bid', [])
         ask_depth = tick_data.get('ask', [])
-        
+
         total_bid_qty, weighted_bid_qty = compute_depth_metrics(bid_depth, DEPTH_WEIGHTS)
         total_ask_qty, weighted_ask_qty = compute_depth_metrics(ask_depth, DEPTH_WEIGHTS)
-        
+
         return {
             'total_bid_qty': total_bid_qty,
             'total_ask_qty': total_ask_qty,
@@ -248,7 +265,7 @@ def process_new_ticks(last_completed_minute=None):
         source_conn = sqlite3.connect(SOURCE_DB, timeout=10)
         source_cursor = source_conn.cursor()
     except sqlite3.OperationalError as e:
-        print(f"⚠️  Cannot access {SOURCE_DB}: {e}")
+        print(f"⚠️  Cannot access {SOURCE_DB}: {e} [{now_ist_str()}]")
         return 0
 
     query = "SELECT instrument_token, ts_ist, tick_json FROM ticks_json WHERE 1=1"
@@ -293,15 +310,39 @@ def process_new_ticks(last_completed_minute=None):
             if candle_data is None:
                 continue
 
+            # Get symbol from token mapping
+            TOKENS = {
+                12601346: "BANKNIFTY",
+                12602626: "NIFTY",
+                341249: "HDFCBANK",
+                1270529: "ICICIBANK",
+                779521: "SBIN",
+                492033: "KOTAKBANK",
+                1510401: "AXISBANK",
+                1346049: "INDUSINDBK",
+                738561: "RELIANCE",
+                2714625: "BHARTIARTL",
+                2953217: "TCS",
+                408065: "INFY",
+                12601602: "FINNIFTY",
+                264969: "INDIA_VIX",
+                12622082: "BAJFINANCE",
+                12621826: "BAJAJFINSV",
+                12804354: "SHRIRAMFIN",
+                12706818: "MUTHOOTFIN",
+                12628994: "CHOLAFIN"
+            }
+            symbol = TOKENS.get(instrument_token, f"UNKNOWN_{instrument_token}")
+            
             output_cursor.execute("""
                 INSERT OR REPLACE INTO minute_candles
-                (instrument_token, time_minute, open, high, low, close, volume,
+                (instrument_token, symbol, time_minute, open, high, low, close, volume,
                  total_bid_qty, total_ask_qty, bid_ask_ratio, order_imbalance, bid_ask_bias,
                  weighted_bid_qty, weighted_ask_qty, weighted_bid_ask_ratio,
                  weighted_order_imbalance, weighted_bias)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """, (
-                instrument_token, time_minute,
+                instrument_token, symbol, time_minute,
                 candle_data['open'], candle_data['high'], candle_data['low'],
                 candle_data['close'], candle_data['volume'],
                 candle_data['total_bid_qty'], candle_data['total_ask_qty'],
@@ -329,45 +370,46 @@ def main():
     print(f"📊 Processing interval: {PROCESSING_INTERVAL} seconds")
     print(f"📁 Source: {SOURCE_DB}")
     print(f"📁 Output: {OUTPUT_DB}")
-    
+
     if ALLOWED_TOKENS:
         print(f"🎯 Instruments: {sorted(ALLOWED_TOKENS)}")
     else:
         print(f"🎯 Instruments: ALL")
-    
+
+    print(f"🕐 Started at: {now_ist_str('%Y-%m-%d %H:%M:%S')} IST")
     print("=" * 80)
 
     # Initialize database
     init_output_db()
-    print("✅ Database initialized")
+    print(f"✅ Database initialized [{now_ist_str()}]")
 
     cycle_count = 0
-    
+
     while not shutdown_requested:
         cycle_count += 1
         cycle_start = time.time()
-        
+
         try:
             # Get last processed minute
             last_minute = get_last_completed_minute()
-            
+
             # Process new data
             processed = process_new_ticks(last_completed_minute=last_minute)
-            
+
             cycle_duration = time.time() - cycle_start
-            
+
             if processed > 0:
-                print(f"[{datetime.now().strftime('%H:%M:%S')}] "
+                print(f"[{now_ist_str()}] "
                       f"Cycle #{cycle_count}: Processed {processed} candles "
                       f"({cycle_duration:.2f}s)")
-            
+
         except Exception as e:
-            print(f"❌ Error in cycle #{cycle_count}: {e}")
-        
+            print(f"❌ Error in cycle #{cycle_count}: {e} [{now_ist_str()}]")
+
         # Sleep until next cycle
         time.sleep(PROCESSING_INTERVAL)
-    
-    print("\n✅ Candle Builder stopped gracefully")
+
+    print(f"\n✅ Candle Builder stopped gracefully [{now_ist_str('%Y-%m-%d %H:%M:%S')}]")
     sys.exit(0)
 
 if __name__ == "__main__":

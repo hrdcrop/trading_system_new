@@ -880,7 +880,7 @@ def decide_action(
 
 def detect_regime(analytics: dict) -> MarketRegime:
     """Detect market regime from analytics."""
-    regime_str = analytics.get('regime', 'UNKNOWN')
+    regime_str = analytics.get('market_regime') or analytics.get('regime', 'UNKNOWN')
 
     if regime_str == "TRENDING_UP":
         return MarketRegime.TRENDING_UP
@@ -896,7 +896,7 @@ def detect_regime(analytics: dict) -> MarketRegime:
 
 def detect_vix_state(analytics: dict) -> VixState:
     """Detect VIX state from analytics."""
-    vix_close = analytics.get('vix_close')
+    vix_close = analytics.get('vix_value') or analytics.get('vix_close')
 
     if vix_close is None:
         return VixState.NORMAL
