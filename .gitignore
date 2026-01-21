@@ -28,3 +28,27 @@ secrets.py
 *.swp
 *.swo
 *.backup
+
+
+
+# Secrets
+api_key.txt
+access_token.txt
+telegram_token.txt
+chat_id.txt
+app_secrets.py
+trading_secrets.py
+
+# Databases
+*.db
+*.db.backup
+
+# Logs & cache
+logs/
+__pycache__/
+*.pyc
+
+# Backups
+*.backup
+*_old.py
+*_backup*.py
