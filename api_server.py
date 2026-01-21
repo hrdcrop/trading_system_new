@@ -64,6 +64,10 @@ def get_analytics_db():
     return conn
 
 def get_alert_db():
+    """Connect to alert database. Returns None if database doesn't exist."""
+    import os
+    if not os.path.exists(ALERT_DB):
+        return None
     conn = sqlite3.connect(ALERT_DB)
     conn.row_factory = sqlite3.Row
     return conn
@@ -286,136 +290,160 @@ def get_latest_alerts():
     Returns latest alert per symbol (BANKNIFTY, NIFTY).
     """
     conn = get_alert_db()
-    cur = conn.cursor()
+    if conn is None:
+        return []
 
-    cur.execute("""
-        SELECT * FROM alerts_final
-        ORDER BY id DESC
-        LIMIT 100
-    """)
+    try:
+        cur = conn.cursor()
 
-    rows = cur.fetchall()
-    conn.close()
+        cur.execute("""
+            SELECT * FROM alerts_final
+            ORDER BY id DESC
+            LIMIT 100
+        """)
 
-    latest_per_symbol = {}
+        rows = cur.fetchall()
+        conn.close()
 
-    for row in rows:
-        metadata = parse_metadata(row["metadata"])
-        quality = metadata["alert_quality"]
+        latest_per_symbol = {}
 
-        if quality not in ["A+", "A"]:
-            continue
+        for row in rows:
+            metadata = parse_metadata(row["metadata"])
+            quality = metadata["alert_quality"]
 
-        symbol = row["symbol"]
+            if quality not in ["A+", "A"]:
+                continue
 
-        if symbol not in latest_per_symbol:
-            market_bias_raw = row["market_bias"] or ""
-            overall_bias = market_bias_raw.split("|")[0] if "|" in market_bias_raw else market_bias_raw
+            symbol = row["symbol"]
 
-            latest_per_symbol[symbol] = {
-                "time": row["time"][:16],
-                "symbol": symbol,
-                "action": row["recommended_action"],
-                "confidence": row["confidence"],
-                "alert_quality": quality,
-                "alert_type": metadata["alert_type"],
-                "why": metadata["why"],
-                "confirmations": metadata["confirmations"],
-                "regime": row["regime"],
-                "vix_state": row["vix_state"],
-                "market_bias": overall_bias
-            }
+            if symbol not in latest_per_symbol:
+                market_bias_raw = row["market_bias"] or ""
+                overall_bias = market_bias_raw.split("|")[0] if "|" in market_bias_raw else market_bias_raw
 
-    return list(latest_per_symbol.values())
+                latest_per_symbol[symbol] = {
+                    "time": row["time"][:16],
+                    "symbol": symbol,
+                    "action": row["recommended_action"],
+                    "confidence": row["confidence"],
+                    "alert_quality": quality,
+                    "alert_type": metadata["alert_type"],
+                    "why": metadata["why"],
+                    "confirmations": metadata["confirmations"],
+                    "regime": row["regime"],
+                    "vix_state": row["vix_state"],
+                    "market_bias": overall_bias
+                }
+
+        return list(latest_per_symbol.values())
+    except sqlite3.OperationalError:
+        return []
 
 @app.get("/alerts/all")
 def get_all_alerts(limit: int = 20):
     """Get all recent alerts with parsed metadata"""
     conn = get_alert_db()
-    cur = conn.cursor()
+    if conn is None:
+        return []
 
-    cur.execute("""
-        SELECT * FROM alerts_final
-        ORDER BY id DESC
-        LIMIT ?
-    """, (limit,))
+    try:
+        cur = conn.cursor()
 
-    rows = cur.fetchall()
-    conn.close()
+        cur.execute("""
+            SELECT * FROM alerts_final
+            ORDER BY id DESC
+            LIMIT ?
+        """, (limit,))
 
-    result = []
-    for row in rows:
-        alert = dict(row)
-        metadata = parse_metadata(alert.get("metadata"))
-        
-        alert["alert_type"] = metadata["alert_type"]
-        alert["alert_quality"] = metadata["alert_quality"]
-        alert["why"] = metadata["why"]
-        alert["confirmations"] = metadata["confirmations"]
-        
-        result.append(alert)
+        rows = cur.fetchall()
+        conn.close()
 
-    return result
+        result = []
+        for row in rows:
+            alert = dict(row)
+            metadata = parse_metadata(alert.get("metadata"))
+
+            alert["alert_type"] = metadata["alert_type"]
+            alert["alert_quality"] = metadata["alert_quality"]
+            alert["why"] = metadata["why"]
+            alert["confirmations"] = metadata["confirmations"]
+
+            result.append(alert)
+
+        return result
+    except sqlite3.OperationalError:
+        return []
 
 @app.get("/alerts/symbol/{symbol}")
 def get_alerts_by_symbol(symbol: str, limit: int = 10):
     """Get alerts for specific symbol"""
     conn = get_alert_db()
-    cur = conn.cursor()
+    if conn is None:
+        return []
 
-    cur.execute("""
-        SELECT * FROM alerts_final
-        WHERE symbol = ?
-        ORDER BY id DESC
-        LIMIT ?
-    """, (symbol, limit))
+    try:
+        cur = conn.cursor()
 
-    rows = cur.fetchall()
-    conn.close()
+        cur.execute("""
+            SELECT * FROM alerts_final
+            WHERE symbol = ?
+            ORDER BY id DESC
+            LIMIT ?
+        """, (symbol, limit))
 
-    result = []
-    for row in rows:
-        alert = dict(row)
-        metadata = parse_metadata(alert.get("metadata"))
-        
-        alert["alert_type"] = metadata["alert_type"]
-        alert["alert_quality"] = metadata["alert_quality"]
-        alert["why"] = metadata["why"]
-        alert["confirmations"] = metadata["confirmations"]
-        
-        result.append(alert)
+        rows = cur.fetchall()
+        conn.close()
 
-    return result
+        result = []
+        for row in rows:
+            alert = dict(row)
+            metadata = parse_metadata(alert.get("metadata"))
+
+            alert["alert_type"] = metadata["alert_type"]
+            alert["alert_quality"] = metadata["alert_quality"]
+            alert["why"] = metadata["why"]
+            alert["confirmations"] = metadata["confirmations"]
+
+            result.append(alert)
+
+        return result
+    except sqlite3.OperationalError:
+        return []
 
 @app.get("/alerts/high-confidence")
 def get_high_confidence_alerts(min_confidence: int = 70, limit: int = 20):
     """Get high confidence alerts"""
     conn = get_alert_db()
-    cur = conn.cursor()
+    if conn is None:
+        return []
 
-    cur.execute("""
-        SELECT * FROM alerts_final
-        WHERE confidence >= ?
-        ORDER BY id DESC
-        LIMIT ?
-    """, (min_confidence, limit))
+    try:
+        cur = conn.cursor()
 
-    rows = cur.fetchall()
-    conn.close()
+        cur.execute("""
+            SELECT * FROM alerts_final
+            WHERE confidence >= ?
+            ORDER BY id DESC
+            LIMIT ?
+        """, (min_confidence, limit))
 
-    result = []
-    for row in rows:
-        alert = dict(row)
-        metadata = parse_metadata(alert.get("metadata"))
-        
-        alert["alert_type"] = metadata["alert_type"]
-        alert["alert_quality"] = metadata["alert_quality"]
-        alert["why"] = metadata["why"]
-        alert["confirmations"] = metadata["confirmations"]
-        
-        result.append(alert)
+        rows = cur.fetchall()
+        conn.close()
 
-    return result
+        result = []
+        for row in rows:
+            alert = dict(row)
+            metadata = parse_metadata(alert.get("metadata"))
+
+            alert["alert_type"] = metadata["alert_type"]
+            alert["alert_quality"] = metadata["alert_quality"]
+            alert["why"] = metadata["why"]
+            alert["confirmations"] = metadata["confirmations"]
+
+            result.append(alert)
+
+        return result
+    except sqlite3.OperationalError:
+        return []
 
 # =====================================================
 # ENDPOINT 6: OI ANALYSIS
