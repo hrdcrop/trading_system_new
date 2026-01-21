@@ -1,44 +1,55 @@
 #!/bin/bash
+# Trading System - Status Check Script
 
-echo "📊 TRADING SYSTEM STATUS"
-echo "━━━━━━━━━━━━━━━━━━━━━━━━"
+echo "════════════════════════════════════════════════════════════"
+echo "📊 Trading System Status Check"
+echo "════════════════════════════════════════════════════════════"
 echo ""
 
-processes=(
-    "tick_json_saver.py:Tick Capture"
-    "candle_builder_1m.py:Candle Builder"
-    "oi_category_builder_v2.py:OI Analyzer"
-    "comprehensive_analytics_engine.py:Analytics Engine"
-    "alert_engine_pro.py:Alert Engine"
-    "api_server.py:API Server"
-)
+# Check Telegram Configuration
+echo "1️⃣  Telegram Configuration:"
+python trading_secrets.py 2>&1 | head -3
+echo ""
 
-running=0
-stopped=0
+# Check Running Processes
+echo "2️⃣  Running Processes:"
+echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+
+processes=("tick_json_saver" "candle_builder" "oi_category_builder" "comprehensive_analytics" "alert_engine_pro" "api_server")
+all_running=true
 
 for proc in "${processes[@]}"; do
-    IFS=':' read -r script name <<< "$proc"
-    if pgrep -f "$script" > /dev/null; then
-        echo "✅ $name - RUNNING"
-        ((running++))
+    if ps aux | grep python | grep -q "$proc"; then
+        echo "  ✅ $proc.py"
     else
-        echo "❌ $name - STOPPED"
-        ((stopped++))
+        echo "  ❌ $proc.py (NOT RUNNING)"
+        all_running=false
     fi
 done
-
-echo ""
-echo "━━━━━━━━━━━━━━━━━━━━━━━━"
-echo "Running: $running | Stopped: $stopped"
 echo ""
 
-if [ $running -eq 6 ]; then
-    echo "🟢 System Status: ALL SERVICES RUNNING"
-elif [ $running -eq 0 ]; then
-    echo "🔴 System Status: ALL SERVICES STOPPED"
+# Check Database Files
+echo "3️⃣  Database Files:"
+echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+
+databases=("tick_json_data.db" "minute_candles.db" "oi_analysis.db" "market_analytics.db" "alerts_pro.db")
+
+for db in "${databases[@]}"; do
+    if [ -f "$db" ]; then
+        size=$(ls -lh "$db" | awk '{print $5}')
+        echo "  ✅ $db ($size)"
+    else
+        echo "  ❌ $db (NOT FOUND)"
+    fi
+done
+echo ""
+
+# Summary
+echo "════════════════════════════════════════════════════════════"
+if $all_running && [ -f "market_analytics.db" ]; then
+    echo "  ✅ System Status: OPERATIONAL 🎉"
 else
-    echo "🟡 System Status: PARTIAL (Some services down)"
+    echo "  ⚠️  System Status: INCOMPLETE"
+    echo "  Run: ./start_all.sh"
 fi
-
-echo ""
-echo "📱 Dashboard: http://localhost:8000"
+echo "════════════════════════════════════════════════════════════"
