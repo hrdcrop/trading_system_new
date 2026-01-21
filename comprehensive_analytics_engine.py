@@ -105,7 +105,8 @@ RSI_OVERBOUGHT = 70
 SIGNAL_KEYS = [
     'ema_9', 'ema_21', 'ema_50', 'ema_200', 'macd', 'adx_trend', 'kalman',
     'rsi', 'stoch', 'cci', 'mfi', 'roc', 'bb', 'atr_trend',
-    'vwap', 'volume_trend', 'obv', 'oi', 'depth', 'pattern', 'regime'
+    'vwap', 'volume_trend', 'obv', 'oi', 'depth', 'pattern', 'regime',
+    'smma_7', 'smma_25', 'lsma_7', 'lsma_25'
 ]
 
 # =====================================================
@@ -266,6 +267,15 @@ def init_analytics_db(conn):
         obv_value REAL,
         adx_value REAL,
         kalman_value REAL,
+        smma_7_value REAL,
+        smma_25_value REAL,
+        lsma_7_value REAL,
+        lsma_25_value REAL,
+        ema_crossover_9_26 INTEGER DEFAULT 0,
+        smma_7_signal INTEGER DEFAULT 0,
+        smma_25_signal INTEGER DEFAULT 0,
+        lsma_7_signal INTEGER DEFAULT 0,
+        lsma_25_signal INTEGER DEFAULT 0,
         bullish_count INTEGER,
         bearish_count INTEGER,
         neutral_count INTEGER,
@@ -378,6 +388,85 @@ def calculate_macd(prices: List[float], fast=12, slow=26, signal=9) -> Tuple[flo
         return macd_line, signal_line, histogram
     except:
         return 0.0, 0.0, 0.0
+
+def calculate_smma(prices: List[float], period: int) -> float:
+    """
+    SMMA - Smoothed Moving Average (also known as RMA - Running Moving Average)
+    Formula: SMMA = (SMMA_prev * (n-1) + current_price) / n
+    """
+    if len(prices) < period:
+        return 0.0
+    try:
+        # First SMMA is simple average
+        smma = sum(prices[:period]) / period
+
+        # Subsequent values use smoothing formula
+        for price in prices[period:]:
+            smma = ((smma * (period - 1)) + price) / period
+
+        return smma
+    except:
+        return 0.0
+
+def calculate_lsma(prices: List[float], period: int, offset: int = 0) -> float:
+    """
+    LSMA - Least Squares Moving Average (Linear Regression)
+    Fits a linear regression line to the prices and returns the forecasted value
+    """
+    if len(prices) < period:
+        return 0.0
+    try:
+        recent = prices[-period:]
+        n = len(recent)
+
+        # Calculate linear regression
+        sum_x = sum(range(n))
+        sum_y = sum(recent)
+        sum_xy = sum(i * recent[i] for i in range(n))
+        sum_x2 = sum(i * i for i in range(n))
+
+        # Slope and intercept
+        slope = (n * sum_xy - sum_x * sum_y) / (n * sum_x2 - sum_x * sum_x)
+        intercept = (sum_y - slope * sum_x) / n
+
+        # Forecast value at the end + offset
+        lsma = intercept + slope * (n - 1 + offset)
+
+        return lsma
+    except:
+        return 0.0
+
+def detect_ema_crossover(prices: List[float], fast_period: int = 9, slow_period: int = 26) -> int:
+    """
+    Detect EMA Crossover
+    Returns:
+        1: Bullish crossover (fast EMA crosses above slow EMA)
+       -1: Bearish crossover (fast EMA crosses below slow EMA)
+        0: No crossover or insufficient data
+    """
+    if len(prices) < slow_period + 1:
+        return 0
+
+    try:
+        # Current EMAs
+        ema_fast = calculate_ema(prices, fast_period)
+        ema_slow = calculate_ema(prices, slow_period)
+
+        # Previous EMAs (one candle ago)
+        ema_fast_prev = calculate_ema(prices[:-1], fast_period)
+        ema_slow_prev = calculate_ema(prices[:-1], slow_period)
+
+        # Detect crossover
+        # Bullish: fast was below slow, now above
+        if ema_fast_prev <= ema_slow_prev and ema_fast > ema_slow:
+            return 1
+        # Bearish: fast was above slow, now below
+        elif ema_fast_prev >= ema_slow_prev and ema_fast < ema_slow:
+            return -1
+        else:
+            return 0
+    except:
+        return 0
 
 def calculate_stochastic(candles: List[Candle], period=14) -> Tuple[float, float]:
     if len(candles) < period:
@@ -650,6 +739,7 @@ def calculate_all_indicators(symbol: str, token: int, candle_data: dict, oi_cate
         'roc_signal': 0, 'bb_signal': 0, 'atr_trend_signal': 0,
         'vwap_signal': 0, 'volume_trend_signal': 0, 'obv_signal': 0,
         'oi_signal': 0, 'depth_signal': 0, 'pattern_signal': 0, 'regime_signal': 0,
+        'smma_7_signal': 0, 'smma_25_signal': 0, 'lsma_7_signal': 0, 'lsma_25_signal': 0,
         'ema_9_value': 0.0, 'ema_21_value': 0.0, 'ema_50_value': 0.0, 'ema_200_value': 0.0,
         'macd_value': 0.0, 'macd_signal_value': 0.0, 'macd_histogram': 0.0,
         'rsi_value': 50.0, 'stoch_k': 50.0, 'stoch_d': 50.0,
@@ -657,6 +747,9 @@ def calculate_all_indicators(symbol: str, token: int, candle_data: dict, oi_cate
         'bb_upper': 0.0, 'bb_middle': 0.0, 'bb_lower': 0.0,
         'atr_value': 0.0, 'vwap_value': 0.0, 'obv_value': 0.0,
         'adx_value': 0.0, 'kalman_value': 0.0,
+        'smma_7_value': 0.0, 'smma_25_value': 0.0,
+        'lsma_7_value': 0.0, 'lsma_25_value': 0.0,
+        'ema_crossover_9_26': 0,
         'bullish_count': 0, 'bearish_count': 0, 'neutral_count': 0,
         'total_active': 0, 'bullish_percentage': 0.0, 'bearish_percentage': 0.0,
         'market_regime': 'RANGING', 'regime_confidence': 0.5,
@@ -808,7 +901,36 @@ def calculate_all_indicators(symbol: str, token: int, candle_data: dict, oi_cate
             elif "BEARISH" in pattern or "BLACK" in pattern:
                 result['pattern_signal'] = -1
 
-        # 21. Regime Signal
+        # 21. SMMA (Smoothed Moving Average) - 7 and 25 periods
+        if len(prices) >= 25:
+            smma_7 = calculate_smma(prices, 7)
+            smma_25 = calculate_smma(prices, 25)
+            result['smma_7_value'] = smma_7
+            result['smma_25_value'] = smma_25
+
+            if smma_7 > 0:
+                result['smma_7_signal'] = 1 if current_price > smma_7 else -1
+            if smma_25 > 0:
+                result['smma_25_signal'] = 1 if current_price > smma_25 else -1
+
+        # 22. LSMA (Least Squares Moving Average) - 7 and 25 periods
+        if len(prices) >= 25:
+            lsma_7 = calculate_lsma(prices, 7, offset=0)
+            lsma_25 = calculate_lsma(prices, 25, offset=0)
+            result['lsma_7_value'] = lsma_7
+            result['lsma_25_value'] = lsma_25
+
+            if lsma_7 > 0:
+                result['lsma_7_signal'] = 1 if current_price > lsma_7 else -1
+            if lsma_25 > 0:
+                result['lsma_25_signal'] = 1 if current_price > lsma_25 else -1
+
+        # 23. EMA Crossover (9/26)
+        if len(prices) >= 27:
+            ema_crossover = detect_ema_crossover(prices, 9, 26)
+            result['ema_crossover_9_26'] = ema_crossover
+
+        # 24. Regime Signal
         regime, confidence = detect_regime(symbol)
         result['market_regime'] = regime.value
         result['regime_confidence'] = confidence
@@ -1095,12 +1217,14 @@ def process_latest_candles():
                         roc_signal, bb_signal, atr_trend_signal,
                         vwap_signal, volume_trend_signal, obv_signal,
                         oi_signal, depth_signal, pattern_signal, regime_signal,
+                        smma_7_signal, smma_25_signal, lsma_7_signal, lsma_25_signal,
                         ema_9_value, ema_21_value, ema_50_value, ema_200_value,
                         macd_value, macd_signal_value, macd_histogram,
                         rsi_value, stoch_k, stoch_d,
                         cci_value, mfi_value, roc_value,
                         bb_upper, bb_middle, bb_lower,
                         atr_value, vwap_value, obv_value, adx_value, kalman_value,
+                        smma_7_value, smma_25_value, lsma_7_value, lsma_25_value, ema_crossover_9_26,
                         bullish_count, bearish_count, neutral_count,
                         total_active, bullish_percentage, bearish_percentage,
                         market_regime, regime_confidence, vix_value, vix_state, detected_pattern
@@ -1117,10 +1241,12 @@ def process_latest_candles():
                         ?, ?, ?,
                         ?, ?, ?, ?,
                         ?, ?, ?, ?,
+                        ?, ?, ?, ?,
                         ?, ?, ?,
                         ?, ?, ?,
                         ?, ?, ?,
                         ?, ?, ?,
+                        ?, ?, ?, ?, ?,
                         ?, ?, ?, ?, ?,
                         ?, ?, ?,
                         ?, ?, ?,
@@ -1128,7 +1254,7 @@ def process_latest_candles():
                     )
                 """, (
                     time_str, token, symbol,
-                    candle_data['open'], candle_data['high'], candle_data['low'], 
+                    candle_data['open'], candle_data['high'], candle_data['low'],
                     candle_data['close'], candle_data['volume'],
                     candle_data['total_bid_qty'], candle_data['total_ask_qty'],
                     candle_data['bid_ask_ratio'], candle_data['order_imbalance'],
@@ -1146,6 +1272,8 @@ def process_latest_candles():
                     indicators['volume_trend_signal'], indicators['obv_signal'],
                     indicators['oi_signal'], indicators['depth_signal'],
                     indicators['pattern_signal'], indicators['regime_signal'],
+                    indicators['smma_7_signal'], indicators['smma_25_signal'],
+                    indicators['lsma_7_signal'], indicators['lsma_25_signal'],
                     indicators['ema_9_value'], indicators['ema_21_value'],
                     indicators['ema_50_value'], indicators['ema_200_value'],
                     indicators['macd_value'], indicators['macd_signal_value'], indicators['macd_histogram'],
@@ -1154,6 +1282,9 @@ def process_latest_candles():
                     indicators['bb_upper'], indicators['bb_middle'], indicators['bb_lower'],
                     indicators['atr_value'], indicators['vwap_value'], indicators['obv_value'],
                     indicators['adx_value'], indicators['kalman_value'],
+                    indicators['smma_7_value'], indicators['smma_25_value'],
+                    indicators['lsma_7_value'], indicators['lsma_25_value'],
+                    indicators['ema_crossover_9_26'],
                     indicators['bullish_count'], indicators['bearish_count'], indicators['neutral_count'],
                     indicators['total_active'], indicators['bullish_percentage'], indicators['bearish_percentage'],
                     indicators['market_regime'], indicators['regime_confidence'],
